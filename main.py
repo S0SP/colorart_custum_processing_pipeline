@@ -28,7 +28,7 @@ load_dotenv()
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GzipMiddleware
+from starlette.middleware.gzip import GzipMiddleware
 from fastapi.responses import JSONResponse
 
 from pipeline.orchestrator import process_image
