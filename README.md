@@ -103,7 +103,13 @@ Quick check for service status and versioning.
 
 ## ☁️ Deployment
 
-### Render (Recommended)
+### 🚅 Railway (Highly Recommended)
+Railway is the best for this project because it **doesn't sleep** and handles heavy Python dependencies perfectly.
+- **New Project**: Go to [Railway](https://railway.app/) and select **"New Project"** -> **"Deploy from GitHub"**.
+- **Variables**: Railway will auto-detect the `$PORT`. Add `PYTHON_VERSION: 3.11.9` in the Variables tab. 
+- **Docker/Native**: Railway will prefer the `Dockerfile` automatically. If you want to use the native runtime, simply delete the `Dockerfile`.
+
+### ☁️ Render
 This repo is **Render Blueprint-ready**. 
 - Connect your GitHub repo.
 - Render will automatically use `render.yaml` to configure your service.
