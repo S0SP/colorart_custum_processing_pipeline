@@ -1,373 +1,134 @@
-# Color-by-Number Backend Pipeline
+# 🎨 ColorArt Backend
+> **High-Performance Image-to-SVG Pipeline for Color-by-Number Applications**
 
-> **Image → Clean SVG + Region Map + Color Palette + Adjacency Graph**  
-> Fully algorithmic. No GPU. No heavy ML models. ~1–2s per image.
-
----
-
-## Architecture Overview
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    POST /api/process                         │
-│              (multipart: image + params)                     │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   Stage 1: Load + Validate       │
-          │   PIL decode → RGB numpy array   │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   Stage 2: Resize               │
-          │   Longest side ≤ max_dimension  │
-          │   (default 1024px)              │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   Stage 3: Illustration detect  │
-          │   Laplacian variance + color    │
-          │   density heuristic             │
-          │   → skip bilateral for cartoons │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   Stage 4: Color Quantization   │  quantizer.py
-          │                                 │
-          │   MiniBatchKMeans(k=N_colors)   │
-          │   → N-color label_map H×W       │
-          │   → micro-region merging        │
-          │   → palette (N,3) uint8         │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   Stage 5: Region Segmentation  │  segmenter.py
-          │                                 │
-          │   Per color: scipy.label()      │
-          │   → connected components        │
-          │   → outer contour + holes       │
-          │   → Douglas-Peucker simplify    │
-          │   → Region dataclass list       │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   Stage 6: Label Placement      │  labeler.py
-          │                                 │
-          │   Per region:                   │
-          │   distance_transform_edt(mask)  │
-          │   → pole of inaccessibility     │
-          │   → (x, y, font_size)           │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   Stage 7: Adjacency Graph      │  adjacency.py
-          │                                 │
-          │   Per region: dilate mask 2px   │
-          │   → ring = dilated - original   │
-          │   → scan id_map at ring pixels  │
-          │   → {region_id: [neighbors]}    │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   Stage 8: SVG Generation       │  vectorizer.py
-          │                                 │  svg_builder.py
-          │   Per contour:                  │
-          │   1. Chaikin corner-cutting ×3  │
-          │   2. Catmull-Rom → Cubic Bezier │
-          │   3. SVG "C" commands           │
-          │                                 │
-          │   → svg_colored (filled)        │
-          │   → svg_outline (white+numbers) │
-          └────────────────┬────────────────┘
-                           │
-          ┌────────────────▼────────────────┐
-          │   JSON Response                  │
-          └─────────────────────────────────┘
-```
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
+[![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)](https://www.python.org/)
+[![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
+[![Render](https://img.shields.io/badge/Render-%2346E3B7.svg?style=for-the-badge&logo=render&logoColor=white)](https://render.com)
 
 ---
 
-## File Structure
+## ✨ Overview
 
-```
-colorbynumber_backend/
-├── main.py                    # FastAPI app & endpoints
-├── requirements.txt
-├── Dockerfile
-├── pipeline/
-│   ├── __init__.py
-│   ├── orchestrator.py        # Pipeline runner (calls all stages)
-│   ├── quantizer.py           # Color quantization (KMeans)
-│   ├── segmenter.py           # Connected component extraction
-│   ├── vectorizer.py          # Contour → smooth Bezier SVG paths
-│   ├── labeler.py             # Pole of inaccessibility label placement
-│   ├── adjacency.py           # Region adjacency graph
-│   └── svg_builder.py         # Final SVG assembly
-└── tests/
-    └── test_pipeline.py       # Standalone test (no server needed)
-```
+**ColorArt Backend** is a specialized image processing engine designed to power "Color-by-Number" style applications. It transforms standard raster images (JPEG, PNG, WebP) into highly structured, vectorized SVG data. 
+
+Unlike heavy AI models, this is a **pure algorithmic pipeline** optimized for speed, reliability, and low resource usage.
+
+### 🚀 Key Features
+- **Intelligent Quantization**: Uses MiniBatchKMeans for lightning-fast color reduction.
+- **Precision Segmentation**: Advanced region extraction with automated micro-region merging to eliminate noise.
+- **Smart Labeling**: Numbers are placed at the **Pole of Inaccessibility** (the geometric center of the largest inscribed circle), ensuring perfect placement every time.
+- **Vectorized Fidelity**: Multi-stage smoothing (Chaikin's corner-cutting + Catmull-Rom splines) for silky-smooth SVG paths.
+- **Interactive Metadata**: Generates a complete **Adjacency Graph** (neighbor list) and precise region coordinates for interactive tap-to-color mobile and web apps.
 
 ---
 
-## Key Algorithms Explained
+## 🛠️ The Pipeline
 
-### 1. Color Quantization — `quantizer.py`
-Uses **MiniBatchKMeans** (scikit-learn). MiniBatch variant is 3–10× faster
-than standard KMeans with nearly identical quality for this use case.
+```mermaid
+graph TD
+    A[Upload Image] --> B[Stage 1: Pre-processing]
+    B --> C[Stage 2: Color Quantization]
+    C --> D[Stage 3: Region Segmentation]
+    D --> E[Stage 4: Smart Labeling]
+    E --> F[Stage 5: SVG Construction]
+    F --> G[JSON Response + SVG Assets]
 
-**Micro-region cleanup**: After quantization, any connected component
-< 0.1% of total pixels is merged into its dominant neighbor using
-morphological dilation. Eliminates noise speckle before contour extraction.
-
-### 2. Contour Smoothing — `vectorizer.py`
-Two-stage smoothing:
-
-**Stage A — Chaikin Corner Cutting (3 iterations)**  
-Chaikin's algorithm is a corner-cutting subdivision that turns a jagged
-polyline into a quadratic B-spline approximation. After 3 iterations,
-point count multiplies by 8× but the curve is very smooth.
-
-```
-Iteration 1:  A──B──C  →  A──q1──r1──q2──r2──q3──r3──C
-              where qᵢ = 0.75·Pᵢ + 0.25·Pᵢ₊₁
-                    rᵢ = 0.25·Pᵢ + 0.75·Pᵢ₊₁
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style G fill:#00ff7f,stroke:#333,stroke-width:2px
 ```
 
-**Stage B — Catmull-Rom → Cubic Bézier**  
-Catmull-Rom splines pass through every control point (unlike pure Bézier)
-producing natural-looking curves. Each segment P[i]→P[i+1] maps to SVG
-cubic Bézier `C CP1 CP2 P[i+1]` where:
-```
-CP1 = P[i]   + (P[i+1] - P[i-1]) / 6
-CP2 = P[i+1] - (P[i+2] - P[i])   / 6
-```
-This ensures C¹ continuity (tangent continuity) at every junction.
-
-### 3. Pole of Inaccessibility — `labeler.py`
-The number inside each region is placed at the **pole of inaccessibility**:
-the point inside the region that is furthest from any boundary.
-This is equivalent to the center of the largest inscribed circle.
-
-Implementation:
-```python
-edt = scipy.ndimage.distance_transform_edt(region_mask)
-# edt[y,x] = distance from pixel (y,x) to nearest boundary
-best_y, best_x = argmax(edt)
-```
-
-For irregular shapes (like a crescent), this naturally picks the widest part.
-Among all pixels at ≥92% of the max EDT value, we pick the one closest to
-the centroid — this avoids choosing a point in a narrow appendage.
-
-**Font size** is proportional to the inscribed circle radius so numbers
-always fit visually.
-
-### 4. Adjacency Graph — `adjacency.py`
-For each region mask:
-1. Dilate by 2 pixels
-2. Compute ring = dilated − original
-3. Look up all unique region IDs in the `id_map` at ring positions
-4. Those IDs are adjacent
-
-This is O(N·H·W) — one dilation pass per region — but in practice very fast
-because dilation only affects boundary pixels.
-
-### 5. SVG Holes — `svg_builder.py`
-Uses **even-odd fill rule** (`fill-rule="evenodd"`) combined with reversed
-winding for hole contours. The outer contour goes clockwise; hole contours
-go counter-clockwise. The SVG engine fills the outer shape and punches
-holes correctly — no clip paths needed.
+1.  **Preprocessing**: Automatic resizing (preserving aspect ratio) and illustration-type detection.
+2.  **Quantization**: Reduction to a specified palette (4–128 colors).
+3.  **Connected Components**: Extraction of unique regions and outer contours.
+4.  **Optimization**: Merging of tiny "speckle" regions into dominant neighbors.
+5.  **Placement**: Finding the point inside each region furthest from its boundary for labels.
+6.  **Smoothing**: Converting jagged polylines into cubic Bézier SVG paths.
 
 ---
 
-## API Reference
+## 🚦 API Reference
 
 ### `POST /api/process`
+Process an image through the pipeline.
 
-**Form fields:**
+**Parameters (Form Data):**
 
 | Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `image` | File | required | JPEG / PNG / WebP / BMP |
-| `num_colors` | int | 12 | Palette size (4–32) |
-| `max_dimension` | int | 1024 | Resize longest side to this |
-| `min_region_area` | int | 80 | Drop regions smaller than N px |
+| :--- | :--- | :--- | :--- |
+| `image` | `File` | Required | JPEG, PNG, WebP, BMP (max 20MB) |
+| `num_colors` | `int` | `32` | Number of colors (4–128) |
+| `max_dimension`| `int` | `1024` | Scale longest side to this (256–2048) |
+| `target_regions`| `int` | `None` | Target count; merges smallest regions to reach this. |
 
-**Response:**
-
+**Example Response:**
 ```json
 {
   "width": 1024,
   "height": 768,
-  "svg_colored": "<svg>...</svg>",
   "svg_outline": "<svg>...</svg>",
-  "svg_palette_legend": "<svg>...</svg>",
-  "regions": [
-    {
-      "region_id": 1,
-      "color_number": 3,
-      "color_hex": "#ff6b9d",
-      "color_rgb": [255, 107, 157],
-      "area": 5234,
-      "bbox": {"x": 100, "y": 200, "w": 80, "h": 60},
-      "label_x": 140.5,
-      "label_y": 230.0,
-      "label_font_size": 14
-    }
-  ],
-  "palette": ["#ff6b9d", "#4a90e2", "..."],
-  "adjacency": {
-    "1": [2, 5, 7],
-    "2": [1, 3]
-  },
-  "timing": {
-    "load": 0.012,
-    "quantize": 0.345,
-    "segment": 0.089,
-    "labels": 0.156,
-    "adjacency": 0.234,
-    "svg": 0.123,
-    "total": 0.959
-  },
-  "meta": {
-    "num_colors_requested": 12,
-    "num_regions": 87,
-    "is_illustration": true
-  }
+  "svg_colored": "<svg>...</svg>",
+  "palette": ["#FF6B9D", "#4A90E2", ...],
+  "regions": [...],
+  "adjacency": { "1": [2, 5], "2": [1, 3] },
+  "timing": { "total": 0.959 }
 }
 ```
 
----
-
-## SVG Element Structure
-
-### Outline SVG (for the Android app canvas)
-```xml
-<svg viewBox="0 0 1024 768" ...>
-  <rect width="1024" height="768" fill="#ffffff"/>
-
-  <!-- Regions: white fill, black outline, even-odd for holes -->
-  <g id="regions">
-    <path
-      id="region-1"
-      d="M 100.000,200.000 C ... Z"
-      fill="#ffffff"
-      stroke="#1a1a1a"
-      stroke-width="1.2"
-      stroke-linejoin="round"
-      fill-rule="evenodd"
-      data-region-id="1"
-      data-color-number="3"
-      data-color="#ff6b9d"
-    />
-    ...
-  </g>
-
-  <!-- Number labels: centered at pole of inaccessibility -->
-  <g id="labels">
-    <text
-      x="140.50" y="230.00"
-      text-anchor="middle"
-      dominant-baseline="central"
-      font-family="Arial, Helvetica, sans-serif"
-      font-weight="bold"
-      font-size="14"
-      fill="#222222"
-      data-region-id="1"
-    >3</text>
-    ...
-  </g>
-</svg>
-```
+### `GET /api/health`
+Quick check for service status and versioning.
 
 ---
 
-## Setup & Run
+## 💻 Local Development
 
+1.  **Clone & Setup**:
+    ```bash
+    git clone https://github.com/S0SP/colorart_custum_processing_pipeline.git
+    cd colorart_custum_processing_pipeline
+    ```
+
+2.  **Install Dependencies**:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3.  **Run Server**:
+    ```bash
+    uvicorn main:app --reload
+    ```
+    Access the interactive API docs at `http://localhost:8000/docs`.
+
+---
+
+## ☁️ Deployment
+
+### Render (Recommended)
+This repo is **Render Blueprint-ready**. 
+- Connect your GitHub repo.
+- Render will automatically use `render.yaml` to configure your service.
+- **Build Command**: `pip install -r requirements.txt`
+- **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
+
+### Docker
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run dev server
-uvicorn main:app --reload --port 8000
-
-# Run tests (no server needed)
-python tests/test_pipeline.py
-
-# Test with real image
-python tests/test_pipeline.py path/to/your/image.jpg
-
-# Docker (Alternative)
-docker build -t cbn-backend .
-docker run -p 8000:8000 cbn-backend
-
-## Deploy to Render.com (Native Python)
-
-1.  **Create a New Web Service**: In Render's dashboard, select **New > Web Service**.
-2.  **Connect Repo**: Connect your GitHub/GitLab repository.
-3.  **Basic Settings**:
-    - **Runtime**: `Python`
-    - **Build Command**: `pip install -r requirements.txt`
-    - **Start Command**: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-4.  **Environment Variables**:
-    - `PYTHON_VERSION`: `3.11.9`
-    - `PORT`: `10000` (Render's default) or any other.
-5.  **Click "Deploy"**.
-
-Alternatively, you can just click **"Blueprint"** and Render will automatically use the `render.yaml` file I've added to this repository.
+docker build -t colorart-backend .
+docker run -p 8000:8000 colorart-backend
 ```
 
 ---
 
-## Performance
-
-| Stage | Time (1024px illustration) |
-|-------|---------------------------|
-| Load + resize | ~15ms |
-| Color quantization | ~300–500ms |
-| Segmentation | ~80–120ms |
-| Label placement | ~150–250ms |
-| Adjacency graph | ~200–350ms |
-| SVG generation | ~100–200ms |
-| **Total** | **~850ms–1.4s** |
-
-**Optimization tips:**
-- Reduce `max_dimension` to 768 → ~2× speedup
-- Reduce `num_colors` to 8 → ~30% speedup
-- **Gzip Compression**: Automatically enabled in `main.py` for SVGs > 1KB.
-- **Environment Variables**: Use a `.env` file (see `.env.example`).
-- **Concurrent Workers**: The Dockerfile is configured with 2 workers. Adjust based on CPU cores.
-- **Reverse Proxy**: Always run behind Nginx/Caddy with SSL.
-- **Auto-Extraction**: Processing results are auto-saved to `./output/` for debugging. Ensure this directory is mounted if using Docker.
+## 🧬 Tech Stack
+- **FastAPI**: Modern, high-performance web framework.
+- **OpenCV**: Advanced image processing and computer vision.
+- **Scikit-Learn**: Robust MiniBatchKMeans for color quantization.
+- **Scipy/Numpy**: Scientific computing for segmentation and EDT.
+- **Pillow**: Versatile image format handling.
 
 ---
 
-## Android Client Integration
+## 📄 License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-```kotlin
-// Kotlin / Retrofit example
-interface ColorByNumberApi {
-    @Multipart
-    @POST("api/process")
-    suspend fun processImage(
-        @Part image: MultipartBody.Part,
-        @Part("num_colors") numColors: RequestBody,
-        @Part("max_dimension") maxDim: RequestBody,
-    ): ProcessResponse
-}
-
-data class ProcessResponse(
-    val width: Int,
-    val height: Int,
-    val svgOutline: String,     // load into WebView or SVG renderer
-    val svgColored: String,
-    val regions: List<RegionDto>,
-    val palette: List<String>,
-    val adjacency: Map<String, List<Int>>
-)
-```
-
-**Rendering the SVG on Android:**
-- Use **[AndroidSVG](https://bigbadaboom.github.io/androidsvg/)** library to render SVG to Canvas
-- Or embed in a `WebView` with touch hit-testing on `<path>` elements
-- Tap detection: use `SVGImageView.getTag()` on `data-region-id` to identify which region was tapped
+---
+*Created with ❤️ for the Color-by-Number community.*
