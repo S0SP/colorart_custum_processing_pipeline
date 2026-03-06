@@ -60,6 +60,14 @@ app.add_middleware(
 )
 app.add_middleware(GzipMiddleware, minimum_size=1000)
 
+@app.get("/")
+async def root():
+    return {
+        "message": "ColorArt Backend is running!",
+        "documentation": "/docs",
+        "health": "/api/health"
+    }
+
 
 # ─────────────────────────────────────────────────────────
 #  Health check
