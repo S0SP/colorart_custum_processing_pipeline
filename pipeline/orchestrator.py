@@ -128,7 +128,7 @@ def process_image(
     timing["adjacency"] = _elapsed(t0)
 
     # ── Stage 8: SVG generation ───────────────────────────
-    svg_colored, svg_outline, svg_animated = build_svgs(
+    svg_colored, svg_outline, svg_animated, region_paths, mega_paths = build_svgs(
         regions,
         image_width=w,
         image_height=h,
@@ -139,24 +139,53 @@ def process_image(
     svg_palette = build_palette_legend_svg(palette_hex)
     timing["svg"] = _elapsed(t0)
 
-    # ── Stage 9: Assemble response ────────────────────────
+    # ── Stage 9: Elite Game Pre-computations ──────────────
+    # 1. Quick Thumbnail (B64) for instant gallery loading
+    import base64
+    thumb = cv2.resize(palette[label_map], (256, int(256*h/w)), interpolation=cv2.INTER_AREA)
+    _, thumb_buf = cv2.imencode(".jpg", cv2.cvtColor(thumb, cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+    thumbnail_b64 = base64.b64encode(thumb_buf).decode("utf-8")
+
+    # 2. Area Analytics (for progress bars)
+    total_area = h * w
+    palette_stats = []
+    for i in range(len(palette)):
+        c_regions = [r for r in regions if r.color_idx == i]
+        c_area = sum(r.area for r in c_regions)
+        palette_stats.append({
+            "color_idx": i,
+            "hex": palette_hex[i],
+            "area_fraction": round(c_area / total_area, 4),
+            "region_count": len(c_regions),
+        })
+
+    # 3. Hint Priority: Sort regions by area (smallest = hardest)
+    # Give high priority score to tiny hidden regions
+    for r in regions:
+        # Score between 0 (easy/large) and 100 (hard/tiny)
+        r.hint_priority = max(0, min(100, int(100 * (1 - (r.area / (total_area * 0.01)))) ))
+
+    # ── Stage 10: Assemble response ───────────────────────
     timing["total"] = _elapsed(t0)
     logger.info(f"Pipeline complete in {timing['total']:.3f}s — {len(regions)} regions")
 
     return {
         "width": w,
         "height": h,
+        "thumbnail_b64": thumbnail_b64, # ELITE: For gallery
         "svg_colored": svg_colored,
         "svg_outline": svg_outline,
         "svg_animated": svg_animated,
-        "svg_palette_legend": svg_palette,
+        "mega_paths_by_color": {str(k): v for k, v in mega_paths.items()}, # ELITE: For 60FPS
         "regions": [
             {
                 "region_id": r.region_id,
                 "color_number": r.color_number,
+                "color_idx": r.color_idx,
                 "color_hex": r.color_hex,
-                "color_rgb": list(r.color_rgb),
+                "path_data": region_paths.get(r.region_id, ""),
                 "area": r.area,
+                "hint_priority": getattr(r, "hint_priority", 50), # ELITE: For help system
                 "bbox": {"x": r.bbox[0], "y": r.bbox[1], "w": r.bbox[2], "h": r.bbox[3]},
                 "label_x": round(r.label_pos[0], 2) if r.label_pos else None,
                 "label_y": round(r.label_pos[1], 2) if r.label_pos else None,
@@ -165,6 +194,7 @@ def process_image(
             for r in regions
         ],
         "palette": palette_hex,
+        "palette_stats": palette_stats, # ELITE: For progress bars
         "adjacency": adjacency,
         "timing": {k: round(v, 4) for k, v in timing.items()},
         "meta": {

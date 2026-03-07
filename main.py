@@ -41,6 +41,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Production Toggle: Set DEBUG_MODE=true in .env or environment to save files to disk
+DEBUG_SAVING = os.getenv("DEBUG_MODE", "False").lower() == "true"
+
 # ── App ───────────────────────────────────────────────────
 app = FastAPI(
     title="Color-by-Number Pipeline API",
@@ -199,39 +202,40 @@ async def process(
         f"total={result['timing']['total']:.3f}s"
     )
 
-    # ── Automatic Extraction (The "Pro Tip" Automation) ────
-    try:
-        from pathlib import Path
-        out_root = Path("output")
-        out_root.mkdir(exist_ok=True)
-        
-        # Clean base name
-        base_name = "".join(c for c in Path(image.filename).stem if c.isalnum() or c in (' ', '.', '_')).rstrip()
-        if not base_name:
-            base_name = "upload"
+    # ── Automatic Extraction (Debugging) ──────────────────
+    if DEBUG_SAVING:
+        try:
+            from pathlib import Path
+            out_root = Path("output")
+            out_root.mkdir(exist_ok=True)
             
-        # Find unique name with counter
-        counter = 1
-        final_name = f"{base_name}_{counter}"
-        while (out_root / f"{final_name}_animated.svg").exists():
-            counter += 1
+            # Clean base name
+            base_name = "".join(c for c in Path(image.filename).stem if c.isalnum() or c in (' ', '.', '_')).rstrip()
+            if not base_name:
+                base_name = "upload"
+                
+            # Find unique name with counter
+            counter = 1
             final_name = f"{base_name}_{counter}"
-        
-        # Save SVGs
-        (out_root / f"{final_name}_animated.svg").write_text(result["svg_animated"], encoding="utf-8")
-        (out_root / f"{final_name}_outline.svg").write_text(result["svg_outline"], encoding="utf-8")
-        (out_root / f"{final_name}_colored.svg").write_text(result["svg_colored"], encoding="utf-8")
-        
-        # Save Debug Info
-        debug_path = out_root / f"{final_name}_debug.json"
-        with open(debug_path, "w") as f:
-            import json
-            debug_data = {k: v for k, v in result.items() if not k.startswith("svg_")}
-            json.dump(debug_data, f, indent=2)
+            while (out_root / f"{final_name}_animated.svg").exists():
+                counter += 1
+                final_name = f"{base_name}_{counter}"
             
-        logger.info(f"Automatically saved results to {out_root.absolute()} as {final_name}")
-    except Exception as save_err:
-        logger.warning(f"Failed to auto-save results: {save_err}")
+            # Save SVGs
+            (out_root / f"{final_name}_animated.svg").write_text(result["svg_animated"], encoding="utf-8")
+            (out_root / f"{final_name}_outline.svg").write_text(result["svg_outline"], encoding="utf-8")
+            (out_root / f"{final_name}_colored.svg").write_text(result["svg_colored"], encoding="utf-8")
+            
+            # Save Debug Info
+            debug_path = out_root / f"{final_name}_debug.json"
+            with open(debug_path, "w") as f:
+                import json
+                debug_data = {k: v for k, v in result.items() if not k.startswith("svg_")}
+                json.dump(debug_data, f, indent=2)
+                
+            logger.info(f"Automatically saved results to {out_root.absolute()} as {final_name}")
+        except Exception as save_err:
+            logger.warning(f"Failed to auto-save results: {save_err}")
 
     return JSONResponse(content=result)
 

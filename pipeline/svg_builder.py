@@ -59,15 +59,19 @@ def build_svgs(
     image_height: int,
     chaikin_iters: int = 3,
     downsample_step: int = 2,
-) -> Tuple[str, str, str]:
+) -> Tuple[str, str, str, Dict[int, str], Dict[int, str]]:
     """
     Build colored, outline and animated SVG strings.
 
     Returns:
-        (svg_colored, svg_outline, svg_animated) as strings
+        (svg_colored, svg_outline, svg_animated, region_paths, paths_by_color) 
     """
-    # Pre-compute all SVG paths (shared between all SVGs)
+    # 1. Pre-compute all individual region paths
     region_paths: Dict[int, str] = {}
+    # 2. MEGA-PATH: Group paths by color_idx for 60FPS frontend performance
+    from collections import defaultdict
+    color_groups = defaultdict(list)
+
     for region in regions:
         path_d = contour_to_svg_path(
             region.outer_contour,
@@ -77,13 +81,19 @@ def build_svgs(
         )
         if path_d:
             region_paths[region.region_id] = path_d
+            color_groups[region.color_idx].append(path_d)
+
+    # Join paths with a space - this is a valid SVG "multi-path"
+    paths_by_color = {
+        c_idx: " ".join(d_list) for c_idx, d_list in color_groups.items()
+    }
 
     svg_colored = _build_colored_svg(regions, region_paths, image_width, image_height)
     svg_outline = _build_outline_svg(regions, region_paths, image_width, image_height)
     svg_animated = _build_animated_svg(regions, region_paths, image_width, image_height)
 
     logger.info(f"Built SVGs: {image_width}x{image_height}, {len(regions)} regions")
-    return svg_colored, svg_outline, svg_animated
+    return svg_colored, svg_outline, svg_animated, region_paths, paths_by_color
 
 
 def _svg_header(w: int, h: int) -> str:
