@@ -5,21 +5,21 @@ Runs the full image → SVG pipeline end-to-end.
 
 Pipeline stages:
   1. Load + validate image
-  2. Resize to processing resolution (keeps aspect ratio)
+  2. Resize to processing resolution
   3. Detect illustration vs photo
   4. Color quantization (KMeans)
   5. Region segmentation (connected components)
   6. Label placement (pole of inaccessibility)
   7. Adjacency graph construction
   8. SVG generation (colored + outline)
-  9. Assemble response payload
-
-All heavy work runs in <2s for a 1024px image on a modern CPU.
-No GPU / ML model required — pure algorithmic pipeline.
+  9. Elite game pre-computations
+  9.5. Region map for O(1) tap detection (NEW)
+  10. Assemble response payload
 """
 
 import time
 import logging
+import base64
 import numpy as np
 import cv2
 from PIL import Image
@@ -31,21 +31,23 @@ from pipeline.segmenter import extract_regions
 from pipeline.labeler import compute_label_positions
 from pipeline.adjacency import build_adjacency_graph
 from pipeline.svg_builder import build_svgs, build_palette_legend_svg
+from pipeline.region_map import generate_region_map  # NEW
 
 logger = logging.getLogger(__name__)
 
 
 # ── Tuneable defaults ──────────────────────────────────────
 DEFAULT_PARAMS = {
-    "num_colors": 32,            # Default to 32 for good detail coverage
+    "num_colors": 32,
     "max_dimension": 1024,
-    "min_region_area": 25,       # Balance: small enough for eyes, big enough to hide noise
+    "min_region_area": 25,
     "min_region_fraction": 0.0002, 
-    "chaikin_iters": 2,          # Balanced smoothness
-    "downsample_step": 1,        
+    "chaikin_iters": 2,
+    "downsample_step": 1,
     "min_font_size": 6,
     "max_font_size": 18,
     "base_font_size": 12,
+    "region_map_width": 512,  # NEW: Target width for region map
 }
 
 
@@ -58,15 +60,8 @@ def process_image(
 ) -> dict:
     """
     Full pipeline: raw image bytes → structured response dict.
-
-    Returns dict with keys:
-        width, height,
-        svg_colored, svg_outline, svg_animated, svg_palette_legend,
-        regions: [{region_id, color_number, color_hex, color_rgb,
-                   area, label_x, label_y, label_font_size}],
-        palette: [hex_string, ...],
-        adjacency: {str(region_id): [neighbor_ids]}
-        timing: {stage: seconds}
+    
+    Now includes region_map_b64 for O(1) tap detection on frontend.
     """
     params = dict(DEFAULT_PARAMS)
     if num_colors is not None:
@@ -141,7 +136,6 @@ def process_image(
 
     # ── Stage 9: Elite Game Pre-computations ──────────────
     # 1. Quick Thumbnail (B64) for instant gallery loading
-    import base64
     thumb = cv2.resize(palette[label_map], (256, int(256*h/w)), interpolation=cv2.INTER_AREA)
     _, thumb_buf = cv2.imencode(".jpg", cv2.cvtColor(thumb, cv2.COLOR_RGB2BGR), [int(cv2.IMWRITE_JPEG_QUALITY), 60])
     thumbnail_b64 = base64.b64encode(thumb_buf).decode("utf-8")
@@ -160,23 +154,56 @@ def process_image(
         })
 
     # 3. Hint Priority: Sort regions by area (smallest = hardest)
-    # Give high priority score to tiny hidden regions
     for r in regions:
-        # Score between 0 (easy/large) and 100 (hard/tiny)
         r.hint_priority = max(0, min(100, int(100 * (1 - (r.area / (total_area * 0.01)))) ))
+
+    timing["precompute"] = _elapsed(t0)
+
+    # ── Stage 9.5: Region Map for O(1) Tap Detection (NEW) ──
+    logger.info(f"Generating region map for {len(regions)} regions...")
+    
+    region_map_data = generate_region_map(
+        regions=[
+            {
+                "region_id": r.region_id,
+                "path_data": region_paths.get(r.region_id, ""),
+                "area": r.area,
+            }
+            for r in regions
+        ],
+        image_width=w,
+        image_height=h,
+        target_width=params["region_map_width"],
+    )
+    timing["region_map"] = _elapsed(t0)
 
     # ── Stage 10: Assemble response ───────────────────────
     timing["total"] = _elapsed(t0)
-    logger.info(f"Pipeline complete in {timing['total']:.3f}s — {len(regions)} regions")
+    logger.info(
+        f"Pipeline complete in {timing['total']:.3f}s — "
+        f"{len(regions)} regions, "
+        f"region_map: {region_map_data['region_map_width']}x{region_map_data['region_map_height']}"
+    )
 
     return {
         "width": w,
         "height": h,
-        "thumbnail_b64": thumbnail_b64, # ELITE: For gallery
+        "thumbnail_b64": thumbnail_b64,
         "svg_colored": svg_colored,
         "svg_outline": svg_outline,
         "svg_animated": svg_animated,
-        "mega_paths_by_color": {str(k): v for k, v in mega_paths.items()}, # ELITE: For 60FPS
+        "svg_palette_legend": svg_palette,
+        "mega_paths_by_color": {str(k): v for k, v in mega_paths.items()},
+        
+        # ══════════════════════════════════════════════════════
+        # NEW: Region Map for O(1) Tap Detection
+        # Frontend decodes this to instantly look up region IDs
+        # ══════════════════════════════════════════════════════
+        "region_map_b64": region_map_data["region_map_b64"],
+        "region_map_width": region_map_data["region_map_width"],
+        "region_map_height": region_map_data["region_map_height"],
+        "region_map_scale": region_map_data["region_map_scale"],
+        
         "regions": [
             {
                 "region_id": r.region_id,
@@ -185,7 +212,7 @@ def process_image(
                 "color_hex": r.color_hex,
                 "path_data": region_paths.get(r.region_id, ""),
                 "area": r.area,
-                "hint_priority": getattr(r, "hint_priority", 50), # ELITE: For help system
+                "hint_priority": getattr(r, "hint_priority", 50),
                 "bbox": {"x": r.bbox[0], "y": r.bbox[1], "w": r.bbox[2], "h": r.bbox[3]},
                 "label_x": round(r.label_pos[0], 2) if r.label_pos else None,
                 "label_y": round(r.label_pos[1], 2) if r.label_pos else None,
@@ -194,7 +221,7 @@ def process_image(
             for r in regions
         ],
         "palette": palette_hex,
-        "palette_stats": palette_stats, # ELITE: For progress bars
+        "palette_stats": palette_stats,
         "adjacency": adjacency,
         "timing": {k: round(v, 4) for k, v in timing.items()},
         "meta": {
