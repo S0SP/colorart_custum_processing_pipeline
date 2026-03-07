@@ -147,7 +147,9 @@ cython_debug/
 
 # VS Code
 .vscode/
-
+api_master.md
+api_master_guide.md
+synthetic_colored.zip
 # Local history
 .history/
 
